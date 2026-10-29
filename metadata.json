@@ -1,0 +1,9 @@
+{
+  "name": "Maya AI - Holographic Android Voice Assistant",
+  "description": "Futuristic Jarvis-style holographic Android voice assistant with real-time Gemini 3.8 Live API voice conversations, explicit neural memory matrix, and verified operational task dispatch.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
