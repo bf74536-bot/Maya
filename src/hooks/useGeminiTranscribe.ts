@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { LanguageMode } from '../types';
+import { getApiHeaders, getRuntimeApiKey } from '../utils/runtimeConfig';
 
 interface UseGeminiTranscribeProps {
   language: LanguageMode;
@@ -95,11 +96,12 @@ export function useGeminiTranscribe({
             try {
               const res = await fetch('/api/transcribe', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getApiHeaders(),
                 body: JSON.stringify({
                   audioBase64: base64Data,
                   mimeType: mimeType.split(';')[0],
                   languageHint: language,
+                  apiKey: getRuntimeApiKey(),
                 }),
               });
 

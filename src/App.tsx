@@ -40,6 +40,7 @@ import {
   triggerReminderAlert,
   parseAndExecuteAction,
 } from './utils/actionManager';
+import { fetchRuntimeConfig, getRuntimeApiKey, getRuntimeLiveModel, getApiHeaders } from './utils/runtimeConfig';
 import { Brain, Check } from 'lucide-react';
 
 const STORAGE_KEY_MESSAGES = 'maya_chat_history_v1';
@@ -111,6 +112,18 @@ export default function App() {
   });
   const useSearchGroundingRef = useRef(useSearchGrounding);
   useSearchGroundingRef.current = useSearchGrounding;
+
+  // Runtime Gemini Configuration (Loaded from /api/config for Render & local environments)
+  const [runtimeConfig, setRuntimeConfig] = useState<{ apiKey: string; liveModel: string }>({
+    apiKey: '',
+    liveModel: 'gemini-2.0-flash-exp',
+  });
+
+  useEffect(() => {
+    fetchRuntimeConfig().then((cfg) => {
+      setRuntimeConfig(cfg);
+    });
+  }, []);
 
   // Persistent Neural Memory Matrix
   const [memories, setMemories] = useState<MemoryItem[]>(() => getStoredMemories());
@@ -491,13 +504,14 @@ export default function App() {
       try {
         const streamResponse = await fetch('/api/chat/stream', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getApiHeaders(),
           body: JSON.stringify({
             message: prompt,
             history: historyPayload,
             language: language,
             memories: memoriesRef.current,
             useSearchGrounding: useSearchGroundingRef.current,
+            apiKey: getRuntimeApiKey(),
           }),
           signal: controller.signal,
         });
@@ -571,13 +585,14 @@ export default function App() {
       if (!streamSucceeded || !accumulatedText.trim()) {
         const fallbackRes = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getApiHeaders(),
           body: JSON.stringify({
             message: prompt,
             history: historyPayload,
             language: language,
             memories: memoriesRef.current,
             useSearchGrounding: useSearchGroundingRef.current,
+            apiKey: getRuntimeApiKey(),
           }),
           signal: controller.signal,
         });
@@ -764,7 +779,7 @@ export default function App() {
     }
   }, [isListening, isSpeaking, state]);
 
-  // Real-Time Gemini 3.8 Live API Hook
+  // Real-Time Gemini Live API Hook
   const {
     isConnected: isLiveConnected,
     isConnecting: isLiveConnecting,
@@ -777,6 +792,8 @@ export default function App() {
   } = useGeminiLive({
     memories,
     voiceName: voiceConfig.persona,
+    apiKey: runtimeConfig.apiKey || getRuntimeApiKey(),
+    liveModel: runtimeConfig.liveModel || getRuntimeLiveModel(),
     onInterrupted: () => {
       setState('interrupted');
       setTimeout(() => setState('ready'), 1000);

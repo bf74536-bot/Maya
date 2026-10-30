@@ -21,15 +21,37 @@ app.use(express.json({ limit: '30mb' }));
 // Serve static public assets (manifest.json, sw.js, icons)
 app.use(express.static(path.join(__dirname, 'public')));
 
-const apiKey = process.env.GEMINI_API_KEY;
-const ai = new GoogleGenAI({
-  apiKey: apiKey,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+const getApiKey = (req?: express.Request | http.IncomingMessage | any): string => {
+  const headerKey = (req?.headers?.['x-gemini-api-key'] || req?.headers?.['x-api-key']) as string;
+  const bodyKey = req?.body?.apiKey;
+  let queryKey = req?.query?.key as string;
+  if (!queryKey && req?.url) {
+    try {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      queryKey = parsedUrl.searchParams.get('key') || '';
+    } catch (e) {
+      // ignore
+    }
+  }
+  return (
+    headerKey ||
+    bodyKey ||
+    queryKey ||
+    process.env.GEMINI_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    ''
+  ).trim();
+};
+
+function getAIClient(customKey?: string) {
+  const key = (customKey || getApiKey()).trim();
+  return new GoogleGenAI({
+    apiKey: key,
+  });
+}
+
+const ai = getAIClient();
 
 function getDynamicSystemInstruction(memories?: any[]) {
   const now = new Date();
@@ -82,15 +104,34 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+// Runtime Configuration & API Key endpoint for Render & browser deployments
+app.get('/api/config', (_req, res) => {
+  const currentKey = getApiKey();
+  const liveModel = process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp';
+  res.json({
+    apiKey: currentKey,
+    hasKey: Boolean(currentKey),
+    liveModel: liveModel,
+    status: 'online',
+    timestamp: Date.now(),
+  });
+});
+
+app.get('/api/key', (_req, res) => {
+  const currentKey = getApiKey();
+  res.json({ apiKey: currentKey, hasKey: Boolean(currentKey) });
+});
+
 // Helper for model calling with exponential backoff on transient errors and instant detection of 429 quota exhaustion
-async function generateAIResponseWithRetry(contents: any[], memories?: any[], tools?: any[]) {
-  const models = ['gemini-3.8-flash', 'gemini-flash-latest'];
+async function generateAIResponseWithRetry(contents: any[], memories?: any[], tools?: any[], customKey?: string) {
+  const aiClient = getAIClient(customKey);
+  const models = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
   let lastError: any = null;
 
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const response = await ai.models.generateContent({
+        const response = await aiClient.models.generateContent({
           model,
           contents,
           config: {
@@ -170,53 +211,62 @@ app.post('/api/chat/stream', async (req, res) => {
 
     const tools = useSearchGrounding ? [{ googleSearch: {} }] : undefined;
 
+    const reqKey = getApiKey(req);
+    const aiClient = getAIClient(reqKey);
+    const streamModels = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
     let fullText = '';
-    try {
-      const responseStream = await ai.models.generateContentStream({
-        model: 'gemini-3.8-flash',
-        contents,
-        config: {
-          systemInstruction: getDynamicSystemInstruction(memories),
-          temperature: 0.7,
-          tools,
-        },
-      });
+    let streamSucceeded = false;
 
-      for await (const chunk of responseStream) {
-        const textChunk = chunk.text || '';
-        if (textChunk) {
-          fullText += textChunk;
-          res.write(`data: ${JSON.stringify({ chunk: textChunk, fullText })}\n\n`);
+    for (const model of streamModels) {
+      try {
+        const responseStream = await aiClient.models.generateContentStream({
+          model,
+          contents,
+          config: {
+            systemInstruction: getDynamicSystemInstruction(memories),
+            temperature: 0.7,
+            tools,
+          },
+        });
+
+        for await (const chunk of responseStream) {
+          const textChunk = chunk.text || '';
+          if (textChunk) {
+            fullText += textChunk;
+            res.write(`data: ${JSON.stringify({ chunk: textChunk, fullText })}\n\n`);
+          }
+        }
+
+        res.write(`data: ${JSON.stringify({ done: true, fullText })}\n\n`);
+        res.end();
+        streamSucceeded = true;
+        break;
+      } catch (streamErr: any) {
+        console.warn(`Streaming attempt on ${model} encountered notice:`, streamErr?.message);
+        const isQuota =
+          streamErr?.status === 429 ||
+          streamErr?.message?.includes('429') ||
+          streamErr?.message?.includes('quota') ||
+          streamErr?.message?.includes('RESOURCE_EXHAUSTED');
+
+        if (isQuota) {
+          res.write(
+            `data: ${JSON.stringify({
+              error: 'quota_exhausted',
+              message: 'Gemini AI model quota is currently exhausted. Please retry in a few moments or check your API plan.',
+            })}\n\n`
+          );
+          res.end();
+          return;
         }
       }
+    }
 
-      res.write(`data: ${JSON.stringify({ done: true, fullText })}\n\n`);
-      res.end();
-    } catch (streamErr: any) {
-      const isQuota =
-        streamErr?.status === 429 ||
-        streamErr?.message?.includes('429') ||
-        streamErr?.message?.includes('quota') ||
-        streamErr?.message?.includes('RESOURCE_EXHAUSTED');
-
-      if (isQuota) {
-        console.warn('Gemini stream quota limit reached (429). Ending stream with quota_exhausted event.');
-        res.write(
-          `data: ${JSON.stringify({
-            error: 'quota_exhausted',
-            message: 'Gemini AI model quota is currently exhausted. Please retry in a few moments or check your API plan.',
-          })}\n\n`
-        );
-        res.end();
-        return;
-      }
-
-      console.warn('Streaming transient error, attempting single turn fallback:', streamErr?.message);
+    if (!streamSucceeded) {
       try {
-        const fallback = await generateAIResponseWithRetry(contents, memories);
+        const fallback = await generateAIResponseWithRetry(contents, memories, tools, reqKey);
         res.write(`data: ${JSON.stringify({ done: true, fullText: fallback.text })}\n\n`);
         res.end();
-        return;
       } catch (fallbackErr) {
         throw fallbackErr;
       }
@@ -251,6 +301,7 @@ app.post('/api/chat/stream', async (req, res) => {
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, history, language, memories, useSearchGrounding } = req.body;
+    const reqKey = getApiKey(req);
 
     if (!message || typeof message !== 'string') {
       res.status(400).json({ error: 'Valid message prompt is required' });
@@ -283,7 +334,7 @@ app.post('/api/chat', async (req, res) => {
     });
 
     const tools = useSearchGrounding ? [{ googleSearch: {} }] : undefined;
-    const result = await generateAIResponseWithRetry(contents, memories, tools);
+    const result = await generateAIResponseWithRetry(contents, memories, tools, reqKey);
 
     res.json({
       text: result.text,
@@ -332,29 +383,52 @@ app.post('/api/vision/analyze', async (req, res) => {
         ? prompt.trim()
         : 'Analyze this visual optical feed with tactical HUD intelligence. Identify objects, visible text/labels, spatial layout, status, anomalies, and notable details. Provide a concise, structured Jarvis-style holographic briefing.';
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: mimeType || 'image/jpeg',
-              data: cleanBase64,
-            },
+    const reqKey = getApiKey(req);
+    const aiClient = getAIClient(reqKey);
+    const visionModels = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+    let analysisText = '';
+    let lastErr: any = null;
+
+    for (const model of visionModels) {
+      try {
+        const response = await aiClient.models.generateContent({
+          model,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || 'image/jpeg',
+                  data: cleanBase64,
+                },
+              },
+              {
+                text: queryPrompt,
+              },
+            ],
           },
-          {
-            text: queryPrompt,
+          config: {
+            systemInstruction: getDynamicSystemInstruction(memories),
+            temperature: 0.4,
           },
-        ],
-      },
-      config: {
-        systemInstruction: getDynamicSystemInstruction(memories),
-        temperature: 0.4,
-      },
-    });
+        });
+
+        if (response.text) {
+          analysisText = response.text;
+          break;
+        }
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`Vision analysis attempt on ${model} notice:`, err?.message);
+        if (err?.status === 429 || err?.message?.includes('429')) break;
+      }
+    }
+
+    if (!analysisText && lastErr) {
+      throw lastErr;
+    }
 
     res.json({
-      analysis: response.text || 'Visual optical scan completed with no distinct observations detected.',
+      analysis: analysisText || 'Visual optical scan completed with no distinct observations detected.',
       timestamp: Date.now(),
     });
   } catch (error: any) {
@@ -379,7 +453,7 @@ app.post('/api/vision/analyze', async (req, res) => {
   }
 });
 
-// Audio Transcription Endpoint using gemini-3.5-transcribe
+// Audio Transcription Endpoint using gemini-3.5-transcribe (with fallback to 2.5-flash)
 app.post('/api/transcribe', async (req, res) => {
   try {
     const { audioBase64, mimeType = 'audio/webm', languageHint } = req.body;
@@ -401,19 +475,40 @@ app.post('/api/transcribe', async (req, res) => {
         ? 'Transcribe this audio verbatim in Hindi. Output only the exact transcribed words with correct punctuation.'
         : 'Transcribe this audio recording verbatim. Output only the exact words spoken with correct punctuation and no extra commentary.';
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-transcribe',
-      contents: { parts: [audioPart, { text: promptText }] },
-    });
+    const reqKey = getApiKey(req);
+    const aiClient = getAIClient(reqKey);
+    const transcribeModels = ['gemini-3.5-transcribe', 'gemini-2.5-flash', 'gemini-3.8-flash'];
+    let transcript = '';
+    let lastErr: any = null;
 
-    const transcript = (response.text || '').trim();
+    for (const model of transcribeModels) {
+      try {
+        const response = await aiClient.models.generateContent({
+          model,
+          contents: { parts: [audioPart, { text: promptText }] },
+        });
+
+        if (response.text) {
+          transcript = response.text.trim();
+          break;
+        }
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`Transcription attempt on ${model} notice:`, err?.message);
+        if (err?.status === 429 || err?.message?.includes('429')) break;
+      }
+    }
+
+    if (!transcript && lastErr) {
+      throw lastErr;
+    }
 
     res.json({
       transcript: transcript || '(No distinct speech detected in audio)',
       timestamp: Date.now(),
     });
   } catch (error: any) {
-    console.error('Error in gemini-3.5-transcribe:', error);
+    console.error('Error in transcription:', error);
     const isQuota =
       error?.status === 429 ||
       error?.message?.includes('429') ||
@@ -435,6 +530,9 @@ app.post('/api/tts', async (req, res) => {
       return;
     }
 
+    const reqKey = getApiKey(req);
+    const aiClient = getAIClient(reqKey);
+
     const sanitizedText = text
       .replace(/[*_#`~[\]]/g, '')
       .replace(/\s+/g, ' ')
@@ -445,7 +543,7 @@ app.post('/api/tts', async (req, res) => {
       ? customVoice
       : (language === 'hi' ? 'Aoede' : 'Zephyr');
 
-    const ttsResponse = await ai.models.generateContent({
+    const ttsResponse = await aiClient.models.generateContent({
       model: 'gemini-3.8-flash-lite-tts',
       contents: [
         {
@@ -522,13 +620,16 @@ async function startServer() {
   });
 
   wss.on('connection', async (clientWs: WebSocket, request: any) => {
-    console.log('Client connected to Gemini 3.8 Live API WebSocket');
+    console.log('Client connected to Gemini Live API WebSocket');
     let session: any = null;
     const pendingAudioQueue: any[] = [];
     let isSessionReady = false;
 
     let clientMemories: any[] = [];
     let requestedVoice = 'Zephyr';
+    let clientKey = '';
+    let clientModel = '';
+
     try {
       if (request?.url) {
         const urlObj = new URL(request.url, 'http://localhost');
@@ -540,89 +641,122 @@ async function startServer() {
         if (voiceParam && ['Zephyr', 'Aoede', 'Kore', 'Fenrir', 'Puck'].includes(voiceParam)) {
           requestedVoice = voiceParam;
         }
+        clientKey = urlObj.searchParams.get('key') || '';
+        clientModel = urlObj.searchParams.get('model') || '';
       }
     } catch (e) {
       // ignore
     }
 
+    const activeKey = clientKey || getApiKey(request);
+    const liveAI = getAIClient(activeKey);
+
+    // Sequence of candidate Live models compatible with normal Google AI Studio keys & preview keys
+    const candidateModels = [
+      clientModel,
+      process.env.GEMINI_LIVE_MODEL,
+      'gemini-2.0-flash-exp',
+      'gemini-2.0-flash-realtime-exp',
+      'gemini-3.8-live',
+    ].filter((m): m is string => Boolean(m && typeof m === 'string' && m.trim().length > 0));
+
+    const uniqueCandidates = Array.from(new Set(candidateModels));
+    let connectedModel = '';
+    let lastConnectError: any = null;
+
     try {
-      session = await ai.live.connect({
-        model: 'gemini-3.8-live',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: requestedVoice },
+      for (const modelCandidate of uniqueCandidates) {
+        try {
+          session = await liveAI.live.connect({
+            model: modelCandidate,
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: requestedVoice },
+                },
+              },
+              systemInstruction: getDynamicSystemInstruction(clientMemories),
             },
-          },
-          systemInstruction: getDynamicSystemInstruction(clientMemories),
-        },
-        callbacks: {
-          onopen: () => {
-            isSessionReady = true;
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ setupComplete: true }));
-            }
-          },
-          onmessage: (message: LiveServerMessage) => {
-            if (message.setupComplete) {
-              isSessionReady = true;
-              if (clientWs.readyState === WebSocket.OPEN) {
-                clientWs.send(JSON.stringify({ setupComplete: true }));
-              }
-            }
-
-            if (message.serverContent?.modelTurn?.parts) {
-              for (const part of message.serverContent.modelTurn.parts) {
-                if (part.inlineData?.data && clientWs.readyState === WebSocket.OPEN) {
-                  clientWs.send(JSON.stringify({ audio: part.inlineData.data }));
+            callbacks: {
+              onopen: () => {
+                isSessionReady = true;
+                if (clientWs.readyState === WebSocket.OPEN) {
+                  clientWs.send(JSON.stringify({ setupComplete: true, model: modelCandidate }));
                 }
-                if (part.text && clientWs.readyState === WebSocket.OPEN) {
-                  clientWs.send(JSON.stringify({ text: part.text }));
+              },
+              onmessage: (message: LiveServerMessage) => {
+                if (message.setupComplete) {
+                  isSessionReady = true;
+                  if (clientWs.readyState === WebSocket.OPEN) {
+                    clientWs.send(JSON.stringify({ setupComplete: true, model: modelCandidate }));
+                  }
                 }
-              }
-            }
 
-            if (message.serverContent?.turnComplete && clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ turnComplete: true }));
-            }
+                if (message.serverContent?.modelTurn?.parts) {
+                  for (const part of message.serverContent.modelTurn.parts) {
+                    if (part.inlineData?.data && clientWs.readyState === WebSocket.OPEN) {
+                      clientWs.send(JSON.stringify({ audio: part.inlineData.data }));
+                    }
+                    if (part.text && clientWs.readyState === WebSocket.OPEN) {
+                      clientWs.send(JSON.stringify({ text: part.text }));
+                    }
+                  }
+                }
 
-            if (message.serverContent?.interrupted && clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ interrupted: true }));
-            }
-          },
-          onclose: () => {
-            console.log('Gemini Live session closed');
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ closed: true }));
-            }
-          },
-          onerror: (err: any) => {
-            console.error('Gemini Live session error:', err);
-            const isQuota =
-              err?.status === 429 ||
-              err?.message?.includes('429') ||
-              err?.message?.includes('quota') ||
-              err?.message?.includes('RESOURCE_EXHAUSTED');
+                if (message.serverContent?.turnComplete && clientWs.readyState === WebSocket.OPEN) {
+                  clientWs.send(JSON.stringify({ turnComplete: true }));
+                }
 
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(
-                JSON.stringify({
-                  error: isQuota
-                    ? 'Gemini Live API quota exhausted.'
-                    : err?.message || 'Live session error',
-                  quotaExceeded: isQuota,
-                })
-              );
-            }
-          },
-        },
-      });
+                if (message.serverContent?.interrupted && clientWs.readyState === WebSocket.OPEN) {
+                  clientWs.send(JSON.stringify({ interrupted: true }));
+                }
+              },
+              onclose: () => {
+                console.log(`Gemini Live session closed for model: ${modelCandidate}`);
+                if (clientWs.readyState === WebSocket.OPEN) {
+                  clientWs.send(JSON.stringify({ closed: true }));
+                }
+              },
+              onerror: (err: any) => {
+                console.error(`Gemini Live session error on ${modelCandidate}:`, err);
+                const isQuota =
+                  err?.status === 429 ||
+                  err?.message?.includes('429') ||
+                  err?.message?.includes('quota') ||
+                  err?.message?.includes('RESOURCE_EXHAUSTED');
+
+                if (clientWs.readyState === WebSocket.OPEN) {
+                  clientWs.send(
+                    JSON.stringify({
+                      error: isQuota
+                        ? 'Gemini Live API quota exhausted.'
+                        : err?.message || 'Live session error',
+                      quotaExceeded: isQuota,
+                    })
+                  );
+                }
+              },
+            },
+          });
+
+          connectedModel = modelCandidate;
+          console.log(`Gemini Live session established successfully using model: ${connectedModel}`);
+          break;
+        } catch (mErr: any) {
+          lastConnectError = mErr;
+          console.warn(`Live model connect attempt on "${modelCandidate}" notice:`, mErr?.message || mErr);
+        }
+      }
+
+      if (!session) {
+        throw lastConnectError || new Error('All Gemini Live candidate models failed to connect.');
+      }
 
       // Flush any queued audio
       isSessionReady = true;
       if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(JSON.stringify({ setupComplete: true }));
+        clientWs.send(JSON.stringify({ setupComplete: true, model: connectedModel }));
       }
       while (pendingAudioQueue.length > 0 && session) {
         const item = pendingAudioQueue.shift();

@@ -21,6 +21,7 @@ import {
   FileImage,
 } from 'lucide-react';
 import { MemoryItem } from '../types';
+import { getApiHeaders, getRuntimeApiKey } from '../utils/runtimeConfig';
 
 interface HolographicVisionModalProps {
   isOpen: boolean;
@@ -175,12 +176,13 @@ export const HolographicVisionModal: React.FC<HolographicVisionModalProps> = ({
     try {
       const res = await fetch('/api/vision/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getApiHeaders(),
         body: JSON.stringify({
           imageBase64: capturedImage,
           mimeType: 'image/jpeg',
           prompt: activePrompt,
           memories: memories || [],
+          apiKey: getRuntimeApiKey(),
         }),
       });
 

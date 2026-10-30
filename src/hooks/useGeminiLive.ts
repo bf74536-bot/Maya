@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { VoicePersona } from '../types';
+import { getRuntimeApiKey, getRuntimeLiveModel, fetchRuntimeConfig } from '../utils/runtimeConfig';
 
 interface UseGeminiLiveProps {
   onInterrupted?: () => void;
@@ -7,6 +8,8 @@ interface UseGeminiLiveProps {
   onAudioActivity?: (level: number) => void;
   memories?: any[];
   voiceName?: VoicePersona;
+  apiKey?: string;
+  liveModel?: string;
 }
 
 // Downsample audio buffer to 16kHz PCM
@@ -38,11 +41,17 @@ export function useGeminiLive({
   onAudioActivity,
   memories,
   voiceName = 'Zephyr',
+  apiKey,
+  liveModel,
 }: UseGeminiLiveProps) {
   const memoriesRef = useRef(memories);
   memoriesRef.current = memories;
   const voiceNameRef = useRef(voiceName);
   voiceNameRef.current = voiceName;
+  const apiKeyRef = useRef(apiKey);
+  apiKeyRef.current = apiKey;
+  const liveModelRef = useRef(liveModel);
+  liveModelRef.current = liveModel;
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
@@ -232,6 +241,22 @@ export function useGeminiLive({
       if (voiceNameRef.current) {
         params.set('voice', voiceNameRef.current);
       }
+
+      // Ensure runtime API key and Live model are included
+      let activeKey = apiKeyRef.current || getRuntimeApiKey();
+      let activeModel = liveModelRef.current || getRuntimeLiveModel();
+      if (!activeKey) {
+        const config = await fetchRuntimeConfig();
+        if (config.apiKey) activeKey = config.apiKey;
+        if (config.liveModel) activeModel = config.liveModel;
+      }
+      if (activeKey) {
+        params.set('key', activeKey);
+      }
+      if (activeModel) {
+        params.set('model', activeModel);
+      }
+
       const queryString = params.toString() ? `?${params.toString()}` : '';
       const wsUrl = `${protocol}//${window.location.host}/live${queryString}`;
       const ws = new WebSocket(wsUrl);

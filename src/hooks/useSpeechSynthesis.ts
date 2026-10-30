@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { LanguageMode, VoiceConfig } from '../types';
+import { getApiHeaders, getRuntimeApiKey } from '../utils/runtimeConfig';
 
 interface UseSpeechSynthesisProps {
   language: LanguageMode;
@@ -225,11 +226,12 @@ export function useSpeechSynthesis({
 
           const res = await fetch('/api/tts', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getApiHeaders(),
             body: JSON.stringify({
               text: cleanText,
               language: activeLang,
               voiceName: voiceConfig?.persona || (activeLang === 'hi' ? 'Aoede' : 'Zephyr'),
+              apiKey: getRuntimeApiKey(),
             }),
             signal: controller.signal,
           });
