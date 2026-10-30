@@ -4,7 +4,7 @@
  */
 
 let cachedApiKey = '';
-let cachedLiveModel = 'gemini-2.0-flash-exp';
+let cachedLiveModel = 'gemini-3.8-live';
 let fetchPromise: Promise<{ apiKey: string; liveModel: string }> | null = null;
 
 export async function fetchRuntimeConfig(): Promise<{ apiKey: string; liveModel: string }> {
@@ -48,7 +48,7 @@ export function getRuntimeApiKey(): string {
 }
 
 export function getRuntimeLiveModel(): string {
-  return cachedLiveModel || 'gemini-2.0-flash-exp';
+  return cachedLiveModel || 'gemini-3.8-live';
 }
 
 export function getApiHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {

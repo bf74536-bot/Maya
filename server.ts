@@ -107,7 +107,7 @@ app.get('/api/health', (_req, res) => {
 // Runtime Configuration & API Key endpoint for Render & browser deployments
 app.get('/api/config', (_req, res) => {
   const currentKey = getApiKey();
-  const liveModel = process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp';
+  const liveModel = process.env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
   res.json({
     apiKey: currentKey,
     hasKey: Boolean(currentKey),
@@ -125,7 +125,7 @@ app.get('/api/key', (_req, res) => {
 // Helper for model calling with exponential backoff on transient errors and instant detection of 429 quota exhaustion
 async function generateAIResponseWithRetry(contents: any[], memories?: any[], tools?: any[], customKey?: string) {
   const aiClient = getAIClient(customKey);
-  const models = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+  const models = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
   let lastError: any = null;
 
   for (const model of models) {
@@ -213,7 +213,7 @@ app.post('/api/chat/stream', async (req, res) => {
 
     const reqKey = getApiKey(req);
     const aiClient = getAIClient(reqKey);
-    const streamModels = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+    const streamModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
     let fullText = '';
     let streamSucceeded = false;
 
@@ -385,7 +385,7 @@ app.post('/api/vision/analyze', async (req, res) => {
 
     const reqKey = getApiKey(req);
     const aiClient = getAIClient(reqKey);
-    const visionModels = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+    const visionModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
     let analysisText = '';
     let lastErr: any = null;
 
@@ -477,7 +477,7 @@ app.post('/api/transcribe', async (req, res) => {
 
     const reqKey = getApiKey(req);
     const aiClient = getAIClient(reqKey);
-    const transcribeModels = ['gemini-3.5-transcribe', 'gemini-2.5-flash', 'gemini-3.8-flash'];
+    const transcribeModels = ['gemini-3.5-transcribe', 'gemini-3.8-flash', 'gemini-flash-latest'];
     let transcript = '';
     let lastErr: any = null;
 
@@ -651,13 +651,12 @@ async function startServer() {
     const activeKey = clientKey || getApiKey(request);
     const liveAI = getAIClient(activeKey);
 
-    // Sequence of candidate Live models compatible with normal Google AI Studio keys & preview keys
+    // Sequence of candidate Live models compatible with active Google AI Studio keys
     const candidateModels = [
       clientModel,
       process.env.GEMINI_LIVE_MODEL,
-      'gemini-2.0-flash-exp',
-      'gemini-2.0-flash-realtime-exp',
       'gemini-3.8-live',
+      'gemini-3.8-live-extended-thinking',
     ].filter((m): m is string => Boolean(m && typeof m === 'string' && m.trim().length > 0));
 
     const uniqueCandidates = Array.from(new Set(candidateModels));

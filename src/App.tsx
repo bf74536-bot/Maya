@@ -116,7 +116,7 @@ export default function App() {
   // Runtime Gemini Configuration (Loaded from /api/config for Render & local environments)
   const [runtimeConfig, setRuntimeConfig] = useState<{ apiKey: string; liveModel: string }>({
     apiKey: '',
-    liveModel: 'gemini-2.0-flash-exp',
+    liveModel: 'gemini-3.8-live',
   });
 
   useEffect(() => {
